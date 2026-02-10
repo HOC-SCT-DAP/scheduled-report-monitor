@@ -7,7 +7,7 @@ import re
 import urllib.request
 from datetime import datetime, date, time
 from time import sleep
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import requests
 from lxml import html
@@ -399,32 +399,48 @@ def fetch_document_html_as_lxml(
         if own_session:
             session.close()
 
-
 def parse_committee_reports_published_today(
     doc: html.HtmlElement,
     existing_order_papers: List[Dict[str, str]] = None
 ) -> Optional[List[Dict[str, str]]]:
     """
-   Parse 'Committee Reports Published Today' section from lxml HTML element.
-   Returns: list of dictionaries with report data, or None if section not found.
-   Filters out duplicates based on existing order papers.
-   """
+    Parse 'Committee Reports Published Today' section from lxml HTML element.
+    Returns: list of dictionaries with report data, or None if section not found.
+    Filters out duplicates based on existing order papers.
+    """
     if existing_order_papers is None:
         existing_order_papers = []
 
-    # Build set of existing (Order Paper date, HC Number) tuples for deduplication
+    existing_keys = _build_existing_keys_set(existing_order_papers)
+    op_date = _extract_order_paper_date(doc)
+    
+    if op_date is None:
+        return None
+
+    target_h3 = _find_committee_reports_section(doc)
+    
+    if target_h3 is None:
+        return None
+
+    return _parse_committee_entries(target_h3, op_date, existing_keys)
+
+
+def _build_existing_keys_set(existing_order_papers: List[Dict[str, str]]) -> set:
+    """Build set of existing (Order Paper date, HC Number) tuples for deduplication."""
     existing_keys = set()
     for op in existing_order_papers:
         op_date = op.get('Order Paper date', '').strip()
         hc_num = op.get('HC Number', '').strip()
         if op_date and hc_num:
             existing_keys.add((op_date, hc_num))
+    return existing_keys
 
+
+def _extract_order_paper_date(doc: html.HtmlElement) -> Optional[date]:
+    """Extract the order paper date from the h1 heading."""
     def _norm(s: str | None) -> str:
         return " ".join((s or "").split())
-
-    # Locate the <h1> to extract order paper date
-    op_date = None
+    
     prefix = "Order Paper for "
     for h1 in doc.xpath("//h1"):
         text = _norm(h1.xpath("string(.)"))
@@ -432,110 +448,264 @@ def parse_committee_reports_published_today(
             op_date_str = text[len(prefix):].strip()
             op_date_str = re.sub(r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+", 
                                  "", op_date_str, flags=re.IGNORECASE)
-            op_date = datetime.strptime(op_date_str, "%d %B %Y").date()
-            break
+            return datetime.strptime(op_date_str, "%d %B %Y").date()
+    return None
 
-    if op_date is None:
-        return None
 
-    # Locate the <h3> section
-    target_h3 = None
+def _find_committee_reports_section(doc: html.HtmlElement) -> Optional[html.HtmlElement]:
+    """Locate the h3 section containing 'Committee Reports Published'."""
+    def _norm(s: str | None) -> str:
+        return " ".join((s or "").split())
+    
     for h3 in doc.xpath("//h3"):
         h3_normed_string = _norm(h3.xpath("string(.)"))
-        if h3_normed_string != None and "Committee Reports Published" in h3_normed_string:
-            target_h3 = h3
-            break
+        if h3_normed_string is not None and "Committee Reports Published" in h3_normed_string:
+            return h3
+    return None
 
-    if target_h3 is None:
-        return None
-
+def _parse_committee_entries(
+    target_h3: html.HtmlElement,
+    op_date: date,
+    existing_keys: set
+) -> List[Dict[str, str]]:
+    """Parse all committee report entries following the target h3."""
     results: List[Dict[str, str]] = []
-    sib = target_h3.getnext()
+    sibling = target_h3.getnext()
 
-    while sib is not None and (not isinstance(sib.tag, str) or sib.tag.lower() not in ("h3", "h2", "h1")):
-        if isinstance(sib.tag, str) and sib.tag.lower() == "h5":
-            committee = _norm(sib.text_content())
-
-            # Walk forward until we find a <p> tag, unless we hit a heading first
-            p1 = sib.getnext()
-            while p1 is not None:
-                # If this is a heading tag, stop immediately
-                if isinstance(p1.tag, str) and p1.tag.lower() in ("h1", "h2", "h3", "h5"):
-                    p1 = None
-                    break
-
-                # If this is a <p> tag, stop the loop
-                if isinstance(p1.tag, str) and p1.tag.lower() == "p":
-                    break
-
-                # Otherwise, keep going
-                p1 = p1.getnext()
-
-            if p1 is not None:
-                # Find all <strong> tags in p
-                strongs = p1.xpath(".//strong")
-
-                if strongs:
-                    first_strong = strongs[0]
-
-                    # Extract the bolded part (report description)
-                    description_text = first_strong.text_content()
-                    report_description = _norm(description_text)
-
-                    # Extract the text immediately after <strong> (HC number)
-                    tail_text = first_strong.tail or ""
-                    hc_number = _norm(tail_text)
-                else:
-                    report_description = ""
-                    hc_number = ""
-
-            # Walk forward until we find a <p> tag, unless we hit a heading first
-            p2 = p1.getnext()
-            while p2 is not None:
-                # If this is a heading tag, stop immediately
-                if isinstance(p2.tag, str) and p2.tag.lower() in ("h1", "h2", "h3", "h5"):
-                    p2 = None
-                    break
-
-                # If this is a <p> tag, stop the loop
-                if isinstance(p2.tag, str) and p2.tag.lower() == "p":
-                    break
-
-                # Otherwise, keep going
-                p2 = p2.getnext()
-
-
-            if p2 is not None:
-                # Find all <strong> tags in p
-                p2strongs = p2.xpath(".//strong")
-
-
-                op_rep_time = ""
-                op_rep_date = ""
-                if p2strongs:
-                    first_p2strong = p2strongs[0]
-                    op_rep_datetime_text = first_p2strong.text_content()
-                    datetime_string = _norm(op_rep_datetime_text)
-                    op_rep_date, op_rep_time = parse_date_time(datetime_string, op_date)
-
-            # Check if this combination already exists
-            op_date_str = str(op_date)
-            if (op_date_str, hc_number) not in existing_keys:
-                item = {
-                    'Order Paper date': op_date_str,
-                    'Committee name': committee,
-                    'Report description': report_description,
-                    'HC Number': hc_number,
-                    'Publication date': str(op_rep_date),
-                    'Publication time': str(op_rep_time),
-                    'HC matched': ''
-                }
-                results.append(item)
-
-        sib = sib.getnext()
+    while sibling is not None and not _is_section_boundary(sibling):
+        if _is_h5_element(sibling):
+            committee_reports = _parse_committee_reports(sibling, op_date, existing_keys)
+            results.extend(committee_reports)
+        
+        sibling = sibling.getnext()
 
     return results
 
+
+def _is_section_boundary(element: html.HtmlElement) -> bool:
+    """Check if element is a section boundary (h1, h2, or h3)."""
+    return isinstance(element.tag, str) and element.tag.lower() in ("h3", "h2", "h1")
+
+
+def _is_h5_element(element: html.HtmlElement) -> bool:
+    """Check if element is an h5 tag."""
+    return isinstance(element.tag, str) and element.tag.lower() == "h5"
+
+
+def _is_heading(element: html.HtmlElement) -> bool:
+    """Check if element is any heading tag."""
+    return isinstance(element.tag, str) and element.tag.lower() in ("h5", "h4", "h3", "h2", "h1")
+
+
+def _is_paragraph(element: html.HtmlElement) -> bool:
+    """Check if element is a paragraph tag."""
+    return isinstance(element.tag, str) and element.tag.lower() == "p"
+
+
+def _norm(s: str | None) -> str:
+    """Normalize whitespace in a string."""
+    return " ".join((s or "").split())
+
+
+def _extract_hc_number(text: str) -> Optional[Tuple[str, str]]:
+    """
+    Extract HC number from text.
+    Returns tuple of (hc_number, remaining_text) or None if not found.
+    
+    HC format: 'HC 123' or 'HC 123-xi' (allowing variable whitespace)
+    """
+    # Pattern matches HC followed by optional whitespace, digits, optional roman numeral suffix
+    pattern = r'HC\s*(\d+(?:-[ivxlcdm]+)?)'
+    match = re.search(pattern, text, re.IGNORECASE)
+    
+    if match:
+        hc_number = f"HC {match.group(1)}"
+        # Get text before the HC number as the report description
+        remaining_text = text[:match.start()].strip()
+        return hc_number, remaining_text
+    
+    return None
+
+
+def _extract_publication_info(text: str, op_date: date) -> Tuple[Optional[date], Optional[str]]:
+    """
+    Extract publication date and time from text.
+    
+    Formats:
+    - "Time of publication: 00.01am"
+    - "Date and time of publication: Monday 14 July, 00.01am"
+    """
+    # Pattern for time only
+    time_pattern = r'Time of publication:\s*(\d{1,2}\.\d{2}(?:am|pm))'
+    time_match = re.search(time_pattern, text, re.IGNORECASE)
+    
+    if time_match:
+        return op_date, time_match.group(1)
+    
+    # Pattern for date and time
+    datetime_pattern = r'Date and time of publication:\s*(?:\w+day\s+)?(\d{1,2})\s+(\w+),\s*(\d{1,2}\.\d{2}(?:am|pm))'
+    datetime_match = re.search(datetime_pattern, text, re.IGNORECASE)
+    
+    if datetime_match:
+        day = int(datetime_match.group(1))
+        month_name = datetime_match.group(2)
+        time_str = datetime_match.group(3)
+        
+        # Parse month name to month number
+        try:
+            month = datetime.strptime(month_name, "%B").month
+        except ValueError:
+            try:
+                month = datetime.strptime(month_name, "%b").month
+            except ValueError:
+                return op_date, time_str
+        
+        # Use op_date year as default
+        pub_date = date(op_date.year, month, day)
+        return pub_date, time_str
+    
+    return None, None
+
+
+def _parse_committee_reports(
+    h5_element: html.HtmlElement,
+    op_date: date,
+    existing_keys: set
+) -> List[Dict[str, str]]:
+    """Parse all report entries for a single committee (h5 element)."""
+    committee = _norm(h5_element.text_content())
+    reports: List[Dict[str, str]] = []
+    
+    element = h5_element.getnext()
+    
+    # Track current report being built
+    current_report: Optional[Dict[str, any]] = None
+    
+    while element is not None and not _is_heading(element):
+        if _is_paragraph(element):
+            text = _norm(element.text_content())
+            
+            # Check if this paragraph contains an HC number (indicates new report)
+            hc_result = _extract_hc_number(text)
+            
+            if hc_result:
+                # Save previous report if exists
+                if current_report and current_report.get('hc_number'):
+                    report = _finalize_report(current_report, committee, op_date, existing_keys)
+                    if report:
+                        reports.append(report)
+                
+                # Start new report
+                hc_number, report_description = hc_result
+                current_report = {
+                    'hc_number': hc_number,
+                    'report_description': report_description,
+                    'pub_date': None,
+                    'pub_time': None
+                }
+                
+                # Check if publication info is in the same paragraph
+                pub_date, pub_time = _extract_publication_info(text, op_date)
+                if pub_date or pub_time:
+                    current_report['pub_date'] = pub_date
+                    current_report['pub_time'] = pub_time
+            
+            elif current_report:
+                # No HC number - might contain publication info for current report
+                pub_date, pub_time = _extract_publication_info(text, op_date)
+                if pub_date or pub_time:
+                    current_report['pub_date'] = pub_date or current_report['pub_date']
+                    current_report['pub_time'] = pub_time or current_report['pub_time']
+        
+        element = element.getnext()
+    
+    # Don't forget the last report
+    if current_report and current_report.get('hc_number'):
+        report = _finalize_report(current_report, committee, op_date, existing_keys)
+        if report:
+            reports.append(report)
+    
+    return reports
+
+
+def _finalize_report(
+    report_data: Dict[str, any],
+    committee: str,
+    op_date: date,
+    existing_keys: set
+) -> Optional[Dict[str, str]]:
+    """Convert report data to final format, checking for duplicates."""
+    op_date_str = str(op_date)
+    hc_number = report_data['hc_number']
+    
+    if (op_date_str, hc_number) in existing_keys:
+        return None
+    
+    return {
+        'Order Paper date': op_date_str,
+        'Committee name': committee,
+        'Report description': report_data['report_description'],
+        'HC Number': hc_number,
+        'Publication date': str(report_data['pub_date'] or op_date),
+        'Publication time': str(report_data['pub_time'] or ''),
+        'HC matched': ''
+    }
+
+
+def _find_next_paragraph(element: Optional[html.HtmlElement]) -> Optional[html.HtmlElement]:
+    """Find the next <p> tag after the given element, stopping at headings."""
+    if element is None:
+        return None
+    
+    next_elem = element.getnext()
+    while next_elem is not None:
+        if isinstance(next_elem.tag, str) and next_elem.tag.lower() in ("h1", "h2", "h3", "h5"):
+            return None
+        if isinstance(next_elem.tag, str) and next_elem.tag.lower() == "p":
+            return next_elem
+        next_elem = next_elem.getnext()
+    
+    return None
+
+
+def _extract_report_info(p: Optional[html.HtmlElement], norm_func) -> tuple[str, str]:
+    """Extract report description and HC number from a paragraph element."""
+    if p is None:
+        return "", ""
+    
+    strongs = p.xpath(".//strong")
+    
+    if strongs:
+        first_strong = strongs[0]
+        description_text = first_strong.text_content()
+        report_description = norm_func(description_text)
+        tail_text = first_strong.tail or ""
+        hc_number = norm_func(tail_text)
+    else:
+        report_description = ""
+        hc_number = ""
+    
+    return report_description, hc_number
+
+
+def _extract_publication_datetime(
+    p: Optional[html.HtmlElement],
+    op_date: date,
+    norm_func
+) -> tuple[str, str]:
+    """Extract publication date and time from a paragraph element."""
+    if p is None:
+        return "", ""
+    
+    strongs = p.xpath(".//strong")
+    
+    if strongs:
+        first_strong = strongs[0]
+        datetime_text = first_strong.text_content()
+        datetime_string = norm_func(datetime_text)
+        return parse_date_time(datetime_string, op_date)
+    
+    return "", ""
 
 # ============================================================================
 # COMMITTEES API
@@ -794,7 +964,11 @@ def filter_and_process_reports(api_url: str, reports_file: str, scans_file: str)
 # MAIN EXECUTION
 # ============================================================================
 
-if __name__ == '__main__':
+test_mode = False
+
+if __name__ == '__main__' and test_mode == False:
+        
+
     REPORTS_FILE = 'docs/Reports.csv'
     SCANS_FILE = 'docs/Scans.csv'
     ORDER_PAPERS_FILE = 'docs/OrderPapers.csv'
@@ -868,3 +1042,75 @@ if __name__ == '__main__':
     print(f"  - {REPORTS_FILE}: {len(all_reports)} rows")
     print(f"  - {SCANS_FILE}: {len(all_scans)} rows")
     print(f"  - {ORDER_PAPERS_FILE}: {len(all_order_papers)} rows")
+
+def test_parse_committee_reports():
+    """Test parse_committee_reports_published_today with real document IDs."""
+    print("\n" + "="*80)
+    print("TESTING parse_committee_reports_published_today")
+    print("="*80)
+    
+    # Test document IDs for order papers
+    test_doc_ids = [
+        102411,  # Example doc, typical example, https://commonsbusiness.parliament.uk/Document/102411/Html?subType=Standard#20260209-34
+        96591,  # Example doc with date and times, https://commonsbusiness.parliament.uk/Document/96591/Html?subType=Standard#20250714-34
+        102449,  # Example doc with multiple reports by one committee, https://commonsbusiness.parliament.uk/Document/102449/Html?subType=Standard#20260210-58
+    ]
+    
+    for doc_id in test_doc_ids:
+        print(f"\n{'-'*80}")
+        print(f"Testing with document ID: {doc_id}")
+        print(f"{'-'*80}")
+        
+        try:
+            # Fetch the HTML document
+            print(f"Fetching HTML for document {doc_id}...")
+            html_doc = fetch_document_html_as_lxml(doc_id)
+            print("✓ HTML fetched successfully")
+            
+            # Parse committee reports
+            print("Parsing committee reports...")
+            results = parse_committee_reports_published_today(html_doc)
+            
+            if results is None:
+                print("⚠ No 'Committee Reports Published Today' section found")
+            elif len(results) == 0:
+                print("✓ Section found but no new reports (all may be duplicates)")
+            else:
+                print(f"✓ Found {len(results)} committee report(s)")
+                print("\nReport details:")
+                for i, report in enumerate(results, 1):
+                    print(f"\n  Report #{i}:")
+                    for key, value in report.items():
+                        print(f"    {key}: {value}")
+            
+            # Test individual subfunctions
+            print("\n  Testing subfunctions:")
+            
+            # Test _extract_order_paper_date
+            op_date = _extract_order_paper_date(html_doc)
+            if op_date:
+                print(f"    ✓ Order paper date: {op_date}")
+            else:
+                print(f"    ⚠ Could not extract order paper date")
+            
+            # Test _find_committee_reports_section
+            section = _find_committee_reports_section(html_doc)
+            if section is not None:
+                print(f"    ✓ Found committee reports section")
+            else:
+                print(f"    ⚠ Committee reports section not found")
+                
+        except HtmlFetchError as e:
+            print(f"✗ Error fetching HTML: {e}")
+        except Exception as e:
+            print(f"✗ Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    print("\n" + "="*80)
+    print("TESTING COMPLETE")
+    print("="*80 + "\n")
+
+
+if test_mode == True: 
+    test_parse_committee_reports()
