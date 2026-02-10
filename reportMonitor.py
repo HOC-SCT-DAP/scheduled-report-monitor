@@ -186,17 +186,29 @@ def _parse_date(s: str, op_date: date):
 
 
 def parse_date_time(text: str, op_date: date):
-    """Parse string containing date and/or time. Returns [date_obj, time_obj_or_empty_str]."""
+    """
+    Extract publication date and time from text.
+    
+    Formats:
+    - "Time of publication: 00.01am"
+    - "Date and time of publication: Monday 14 July, 00.01am"
+    """
     if not isinstance(text, str):
         raise TypeError("text must be a string")
 
+    if 'ime of publication:' in text:
+        date_time_string = text.rsplit('ime of publication:')[1]
+    else:
+        t = ""
+        d = ""
+
     if ',' in text:
-        parts = text.split(',', 1)
+        parts = date_time_string.split(',', 1)
         text_date = parts[0].strip()
         text_time = parts[1].strip()
 
     else:
-        text_time = text
+        text_time = date_time_string
         text_date = ""
 
     t = _parse_time(text_time)
@@ -526,47 +538,6 @@ def _extract_hc_number(text: str) -> Optional[Tuple[str, str]]:
     
     return None
 
-
-def _extract_publication_info(text: str, op_date: date) -> Tuple[Optional[date], Optional[str]]:
-    """
-    Extract publication date and time from text.
-    
-    Formats:
-    - "Time of publication: 00.01am"
-    - "Date and time of publication: Monday 14 July, 00.01am"
-    """
-    # Pattern for time only
-    time_pattern = r'Time of publication:\s*(\d{1,2}\.\d{2}(?:am|pm))'
-    time_match = re.search(time_pattern, text, re.IGNORECASE)
-    
-    if time_match:
-        return op_date, time_match.group(1)
-    
-    # Pattern for date and time
-    datetime_pattern = r'Date and time of publication:\s*(?:\w+day\s+)?(\d{1,2})\s+(\w+),\s*(\d{1,2}\.\d{2}(?:am|pm))'
-    datetime_match = re.search(datetime_pattern, text, re.IGNORECASE)
-    
-    if datetime_match:
-        day = int(datetime_match.group(1))
-        month_name = datetime_match.group(2)
-        time_str = datetime_match.group(3)
-        
-        # Parse month name to month number
-        try:
-            month = datetime.strptime(month_name, "%B").month
-        except ValueError:
-            try:
-                month = datetime.strptime(month_name, "%b").month
-            except ValueError:
-                return op_date, time_str
-        
-        # Use op_date year as default
-        pub_date = date(op_date.year, month, day)
-        return pub_date, time_str
-    
-    return None, None
-
-
 def _parse_committee_reports(
     h5_element: html.HtmlElement,
     op_date: date,
@@ -605,14 +576,14 @@ def _parse_committee_reports(
                 }
                 
                 # Check if publication info is in the same paragraph
-                pub_date, pub_time = _extract_publication_info(text, op_date)
+                pub_date, pub_time = parse_date_time(text, op_date)
                 if pub_date or pub_time:
                     current_report['pub_date'] = pub_date
                     current_report['pub_time'] = pub_time
             
             elif current_report:
                 # No HC number - might contain publication info for current report
-                pub_date, pub_time = _extract_publication_info(text, op_date)
+                pub_date, pub_time = parse_date_time(text, op_date)
                 if pub_date or pub_time:
                     current_report['pub_date'] = pub_date or current_report['pub_date']
                     current_report['pub_time'] = pub_time or current_report['pub_time']
@@ -650,62 +621,6 @@ def _finalize_report(
         'Publication time': str(report_data['pub_time'] or ''),
         'HC matched': ''
     }
-
-
-def _find_next_paragraph(element: Optional[html.HtmlElement]) -> Optional[html.HtmlElement]:
-    """Find the next <p> tag after the given element, stopping at headings."""
-    if element is None:
-        return None
-    
-    next_elem = element.getnext()
-    while next_elem is not None:
-        if isinstance(next_elem.tag, str) and next_elem.tag.lower() in ("h1", "h2", "h3", "h5"):
-            return None
-        if isinstance(next_elem.tag, str) and next_elem.tag.lower() == "p":
-            return next_elem
-        next_elem = next_elem.getnext()
-    
-    return None
-
-
-def _extract_report_info(p: Optional[html.HtmlElement], norm_func) -> tuple[str, str]:
-    """Extract report description and HC number from a paragraph element."""
-    if p is None:
-        return "", ""
-    
-    strongs = p.xpath(".//strong")
-    
-    if strongs:
-        first_strong = strongs[0]
-        description_text = first_strong.text_content()
-        report_description = norm_func(description_text)
-        tail_text = first_strong.tail or ""
-        hc_number = norm_func(tail_text)
-    else:
-        report_description = ""
-        hc_number = ""
-    
-    return report_description, hc_number
-
-
-def _extract_publication_datetime(
-    p: Optional[html.HtmlElement],
-    op_date: date,
-    norm_func
-) -> tuple[str, str]:
-    """Extract publication date and time from a paragraph element."""
-    if p is None:
-        return "", ""
-    
-    strongs = p.xpath(".//strong")
-    
-    if strongs:
-        first_strong = strongs[0]
-        datetime_text = first_strong.text_content()
-        datetime_string = norm_func(datetime_text)
-        return parse_date_time(datetime_string, op_date)
-    
-    return "", ""
 
 # ============================================================================
 # COMMITTEES API
@@ -886,7 +801,7 @@ def match_order_papers_to_reports(order_papers: List[Dict[str, str]],
                         response = requests.post("https://api.pushover.net/1/messages.json", data={
                             "token": os.environ['PUSH_API_TOKEN'],
                             "user": os.environ['PUSH_USER_KEY'], 
-                            "message": "Report missing",
+                            "message": ";".join(op_row),
                             "priority": 2,  # Emergency - will make noise until acknowledged
                             "retry": 10,
                             "expire": 300  # 5 minutes for testing
