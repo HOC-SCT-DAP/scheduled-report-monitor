@@ -883,6 +883,14 @@ def match_order_papers_to_reports(order_papers: List[Dict[str, str]],
 
                     if now > pub_datetime:
                         op_row['HC matched'] = 'Missing'
+                        response = requests.post("https://api.pushover.net/1/messages.json", data={
+                            "token": os.environ['PUSH_API_TOKEN'],
+                            "user": os.environ['PUSH_USER_KEY'], 
+                            "message": "Report missing",
+                            "priority": 2,  # Emergency - will make noise until acknowledged
+                            "retry": 10,
+                            "expire": 300  # 5 minutes for testing
+                        })
                     else:
                         op_row['HC matched'] = 'Due'
                 except ValueError:
