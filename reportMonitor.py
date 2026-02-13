@@ -235,7 +235,7 @@ def get_document_id_for_date(
     page_size: int = 20,
     timeout: int = 15,
     max_pages: int = 200,
-    notes_text: str = "Today's business in the Chamber and Westminster Hall.",
+    notes_text: str = "Today's business in the Chamber and Westminster Hall",
     retry_attempts: int = 3,
     retry_backoff: float = 0.8,
     session: Optional[requests.Session] = None,
