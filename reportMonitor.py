@@ -527,7 +527,7 @@ def _extract_hc_number(text: str) -> Optional[Tuple[str, str]]:
     HC format: 'HC 123' or 'HC 123-xi' (allowing variable whitespace)
     """
     # Pattern matches HC followed by optional whitespace, digits, optional roman numeral suffix
-    pattern = r'HC\s*(\d+(?:-[ivxlcdm]+)?)'
+    pattern = r'HC\s*(\d+(?:-[ivxlc]+)?)'
     match = re.search(pattern, text, re.IGNORECASE)
     
     if match:
