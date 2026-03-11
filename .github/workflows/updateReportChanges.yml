@@ -6,6 +6,8 @@ on:
     - cron: '5 0 * * *'
     - cron: '5 9 * * *'
     - cron: '5 11 * * *'  
+  repository_dispatch:
+    types: [cron-job-ping]
   workflow_dispatch:  # Allows manual trigger from GitHub UI
 
 jobs:
